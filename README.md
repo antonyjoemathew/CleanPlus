@@ -3,7 +3,7 @@
 The live site for **CleanPlus Laundry** (Kakkanad, Kochi) — a prerendered, fully
 static bundle. Deployed to an Azure VM by GitHub Actions on every push to `main`.
 
-Currently live at <https://pingee.app/cleanpluslaundry/>.
+Live at <https://www.cleanpluslaundry.in/>.
 
 ## What's in this repo
 
@@ -23,11 +23,9 @@ robots.txt
 
 No build step is needed — the deploy copies these files as-is.
 
-> **Important:** every asset URL inside the HTML is absolute under
-> `/cleanpluslaundry/` (and `site.webmanifest` sets `start_url` / `scope` to
-> `/cleanpluslaundry/`). The site must therefore be served at the URL path
-> **`/cleanpluslaundry/`**, not at the domain root. The nginx block below does
-> exactly that.
+All asset URLs are **root-relative** (`/assets/...`), so the site must be served
+from the **domain root**, which is what `cleanpluslaundry.in` does. It is no
+longer built for the `/cleanpluslaundry/` subpath that `pingee.app` used.
 
 ## Deployment
 
@@ -45,9 +43,9 @@ What it does:
 
 ### Required GitHub secrets
 
-Add these under **Settings → Secrets and variables → Actions → Secrets →
-New repository secret**. Same four names as the Pingee-Web repo — only the
-values differ (this is a different VM / IP).
+Under **Settings → Secrets and variables → Actions → Secrets → New repository
+secret**. Same four names as the Pingee-Web repo — only the values differ, since
+this is a different VM.
 
 | Secret | What it is | Example |
 | --- | --- | --- |
@@ -60,76 +58,89 @@ The matching **public** key must be in `~/.ssh/authorized_keys` for
 `AZURE_VM_USER` on the VM.
 
 Because the deploy runs `sudo` non-interactively, that user needs passwordless
-sudo — e.g. `/etc/sudoers.d/deploy`:
+sudo — e.g. in `/etc/sudoers.d/deploy`:
 
 ```
-azureuser ALL=(ALL) NOPASSWD: /bin/mkdir, /bin/rm, /bin/cp, /bin/chown, /usr/bin/find, /bin/ls, /usr/sbin/nginx, /bin/systemctl
+azureuser ALL=(ALL) NOPASSWD: ALL
 ```
-
-(or simply `azureuser ALL=(ALL) NOPASSWD: ALL` if that's how the Pingee VM is
-already set up).
 
 ### Deploy paths (not secrets)
 
-These are plain `env:` values at the top of `.github/workflows/deploy.yml` —
-edit the file if the server layout differs:
+Plain `env:` values at the top of `.github/workflows/deploy.yml` — edit the file
+if the server layout changes:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DEPLOY_PATH` | `/var/www/cleanpluslaundry` | Final folder served by nginx. Its own dedicated folder, so other sites on the VM are untouched. |
+| `DEPLOY_PATH` | `/var/www/cleanpluslaundry` | Folder nginx serves this site from. Its own dedicated folder, so the other sites on the VM are untouched. |
 | `STAGING_PATH` | `/tmp/cleanpluslaundry-new` | Temporary upload folder, deleted after a successful deploy. |
 
-## One-time VM setup
+## nginx
 
-```bash
-sudo mkdir -p /var/www/cleanpluslaundry
-sudo chown -R www-data:www-data /var/www/cleanpluslaundry
-```
-
-Then serve that folder at `/cleanpluslaundry/` in the site's nginx server block:
+The site is its own vhost at the domain root, reading from its dedicated folder:
 
 ```nginx
-# The URL prefix and the folder name match, so plain `root` resolves
-# /cleanpluslaundry/<x> -> /var/www/cleanpluslaundry/<x> with no alias quirks.
+server {
+    listen 443 ssl http2;
+    server_name www.cleanpluslaundry.in cleanpluslaundry.in;
 
-location = /cleanpluslaundry {
-    return 301 /cleanpluslaundry/;
-}
-
-location /cleanpluslaundry/ {
-    root /var/www;
+    root /var/www/cleanpluslaundry;
     index index.html;
 
-    # Clean URLs: /cleanpluslaundry/about/ -> about/index.html
-    try_files $uri $uri/ =404;
-}
+    # Every route is prerendered as its own folder, so a directory request
+    # resolves to that folder's index.html. Return a real 404 for anything
+    # missing — falling back to /index.html makes a missing stylesheet or image
+    # answer 200 with HTML, which is what broke the styling before.
+    location / {
+        try_files $uri $uri/ $uri/index.html =404;
+    }
 
-# Filenames are content-hashed, so cache them hard.
-location ^~ /cleanpluslaundry/assets/ {
-    root /var/www;
-    try_files $uri =404;
-    expires 1y;
-    add_header Cache-Control "public, immutable";
+    # Filenames are content-hashed, so cache them hard.
+    location ^~ /assets/ {
+        try_files $uri =404;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # ssl_certificate / ssl_certificate_key managed by certbot
 }
 ```
 
 Apply with `sudo nginx -t && sudo systemctl reload nginx`.
 
+Worth adding if it isn't there yet: a 301 from `cleanpluslaundry.in` to
+`www.cleanpluslaundry.in`. Both currently answer 200, which splits crawlers'
+view of the same pages — the canonical tags say `www`.
+
 ## Updating the site
 
-The React/TanStack Start **source** for this site is a separate project
-(`cleanplus-laundry`, pushed to `antonyjoemathew/suds-and-say-hello`). To change
-content or design: edit there, run `bun run build`, then copy the contents of
-`.output/public/` over this repo's root and push.
+The React / TanStack Start **source** for this site lives next to this repo at
+`../cleanplus-laundry-src` (git remote `antonyjoemathew/suds-and-say-hello`).
 
-Two things to remember when the site moves to its own domain:
+```bash
+cd ../cleanplus-laundry-src
+bun install          # first time only
+bun run build        # prerenders into .output/public
+```
 
-- `vite.config.ts` in the source sets `BASE_PATH = "/cleanpluslaundry/"`. Serving
-  at a domain root means changing that and rebuilding.
-- The Open Graph tags and the manifest icons still point at
-  `https://pingee.app/cleanpluslaundry/...`. Those are absolute by design (social
-  scrapers need them) and only affect link previews — update them in the source
-  and rebuild once a final domain is decided.
+Then copy the result over this repo's root and push:
+
+```bash
+cd ../CleanPlusLaundry
+find . -mindepth 1 -maxdepth 1 ! -name .git ! -name .github ! -name .gitignore ! -name README.md -exec rm -rf {} +
+cp -R ../cleanplus-laundry-src/.output/public/. ./
+git add -A && git commit -m "Rebuild the site" && git push
+```
+
+Clearing first matters: asset filenames are content-hashed, so a plain copy
+would leave the previous build's chunks behind.
+
+Domain-related settings in the source, if the site ever moves again:
+
+- `vite.config.ts` — `BASE_PATH` (`"/"` for a domain root)
+- `src/lib/seo.ts` — `BASE_PATH` and `DEFAULT_SITE_URL` (the canonical domain
+  used for `rel=canonical`, `og:url` and the share card URL; overridable at
+  build time with `VITE_SITE_URL`)
+- `public/site.webmanifest` — `start_url`, `scope`, icon paths
 
 ## Brand
 
