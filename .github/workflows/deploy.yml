@@ -1,0 +1,89 @@
+name: Deploy CleanPlus Laundry Site
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+# The site in this repo is already a built, prerendered static bundle, so there
+# is no build step — the repo root IS the web root. Every asset URL inside the
+# HTML is absolute under /cleanpluslaundry/, so the folder must be served at
+# that URL path on the VM (see README.md for the nginx block).
+env:
+  DEPLOY_PATH: /var/www/cleanpluslaundry
+  STAGING_PATH: /tmp/cleanpluslaundry-new
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Upload via rsync
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.AZURE_VM_SSH_KEY }}" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+
+        ssh-keyscan -p ${{ secrets.AZURE_VM_PORT }} ${{ secrets.AZURE_VM_HOST }} >> ~/.ssh/known_hosts
+
+        # Everything except repo plumbing and docs is site content.
+        rsync -avz --delete \
+          --exclude '.git' \
+          --exclude '.github' \
+          --exclude '.gitignore' \
+          --exclude 'README.md' \
+          --exclude '.DS_Store' \
+          -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.AZURE_VM_PORT }}" \
+          ./ \
+          ${{ secrets.AZURE_VM_USER }}@${{ secrets.AZURE_VM_HOST }}:${{ env.STAGING_PATH }}/
+
+        echo "Files transferred to ${{ env.STAGING_PATH }}/"
+
+    - name: Move to production and set permissions
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.AZURE_VM_HOST }}
+        port: ${{ secrets.AZURE_VM_PORT }}
+        username: ${{ secrets.AZURE_VM_USER }}
+        key: ${{ secrets.AZURE_VM_SSH_KEY }}
+        envs: DEPLOY_PATH,STAGING_PATH
+        script: |
+          set -e
+
+          # Never let an empty or root path reach the rm below.
+          case "$DEPLOY_PATH" in
+            ""|"/"|"/var"|"/var/www") echo "Refusing to deploy to '$DEPLOY_PATH'"; exit 1 ;;
+          esac
+
+          echo "Files in $STAGING_PATH/:"
+          ls -la "$STAGING_PATH/"
+
+          echo ""
+          echo "Moving to production at $DEPLOY_PATH ..."
+          sudo mkdir -p "$DEPLOY_PATH"
+          sudo rm -rf "$DEPLOY_PATH"/*
+          sudo cp -r "$STAGING_PATH"/. "$DEPLOY_PATH"/
+
+          echo ""
+          echo "Setting permissions..."
+          sudo chown -R www-data:www-data "$DEPLOY_PATH"
+          sudo find "$DEPLOY_PATH" -type d -exec chmod 755 {} \;
+          sudo find "$DEPLOY_PATH" -type f -exec chmod 644 {} \;
+
+          echo ""
+          echo "Result:"
+          sudo ls -la "$DEPLOY_PATH/"
+
+          echo ""
+          echo "Cleanup..."
+          rm -rf "$STAGING_PATH"
+
+          echo ""
+          echo "Reloading Nginx..."
+          sudo nginx -t && sudo systemctl reload nginx
+
+          echo "✅ DONE"
